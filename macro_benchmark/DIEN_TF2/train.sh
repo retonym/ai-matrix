@@ -26,7 +26,7 @@ mkdir results
 # batchs='256 512 1024'
 batchs=128
 manner=benchmark
-data_type=FP32
+data_type=BF16
 
 for batch in $batchs
 do
