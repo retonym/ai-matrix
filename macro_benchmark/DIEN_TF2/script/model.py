@@ -1,5 +1,6 @@
 import tensorflow as tf
 from tensorflow.python.ops.rnn_cell import GRUCell
+# from tensorflow.compat.v1.nn.rnn_cell import GRUCell
 from tensorflow.python.ops.rnn_cell import LSTMCell
 from tensorflow.python.ops.rnn import bidirectional_dynamic_rnn as bi_rnn
 #from tensorflow.python.ops.rnn import dynamic_rnn
@@ -7,6 +8,9 @@ from rnn import dynamic_rnn
 from utils import *
 from Dice import dice
 import numpy as np
+
+from tensorflow.python.client import timeline
+from tensorflow.python.platform import gfile
 
 class Model(object):
     def __init__(self, n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, 
@@ -17,8 +21,15 @@ class Model(object):
 
         if data_type == 'FP32':
             self.model_dtype = tf.float32
+            self.input_dtype = tf.float32
         elif data_type == 'FP16':
             self.model_dtype = tf.float16
+            self.input_dtype = tf.float16
+        elif data_type == 'BF16':
+            # For BF16 training, currently we still use FP32 as dataset input
+            # TODO(yunfei): can we directly load dataset with BF16
+            self.model_dtype = tf.bfloat16
+            self.input_dtype = tf.float32
         else:
             raise ValueError("Invalid model data type: %s" % data_type)
 
@@ -52,12 +63,12 @@ class Model(object):
                 self.mask = tf.random.uniform([batch_size, max_length], 
                     minval = 0, 
                     maxval= 1, # TODO
-                    dtype = self.model_dtype,
+                    dtype = self.input_dtype,
                     name='mask')    
                 self.target_ph = tf.random.uniform([batch_size, 2], 
                     minval = 0, 
                     maxval= 1,
-                    dtype = self.model_dtype,
+                    dtype = self.input_dtype,
                     name='target_ph') 
                 
                 self.lr = 0.5 # half it every iteration
@@ -80,9 +91,9 @@ class Model(object):
                 self.uid_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, ], name='uid_batch_ph')
                 self.mid_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, ], name='mid_batch_ph')
                 self.cat_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, ], name='cat_batch_ph')
-                self.mask = tf.compat.v1.placeholder(self.model_dtype, [None, None], name='mask')
+                self.mask = tf.compat.v1.placeholder(self.input_dtype, [None, None], name='mask')
                 self.seq_len_ph = tf.compat.v1.placeholder(tf.int32, [None], name='seq_len_ph')
-                self.target_ph = tf.compat.v1.placeholder(self.model_dtype, [None, None], name='target_ph')
+                self.target_ph = tf.compat.v1.placeholder(self.input_dtype, [None, None], name='target_ph')
                 self.lr = tf.compat.v1.placeholder(tf.float64, [])
                 self.use_negsampling =use_negsampling
                 if use_negsampling:
@@ -94,18 +105,18 @@ class Model(object):
             if device == 'cpu':
                 with tf.device('/cpu:0'):
                     print('embedding on ' + device)
-                    self.uid_embeddings_var = tf.compat.v1.get_variable("uid_embedding_var", [n_uid, EMBEDDING_DIM], dtype=self.model_dtype)
+                    self.uid_embeddings_var = tf.compat.v1.get_variable("uid_embedding_var", [n_uid, EMBEDDING_DIM], dtype=self.input_dtype)
                     tf.compat.v1.summary.histogram('uid_embeddings_var', self.uid_embeddings_var)
                     self.uid_batch_embedded = tf.nn.embedding_lookup(self.uid_embeddings_var, self.uid_batch_ph)
 
-                    self.mid_embeddings_var = tf.compat.v1.get_variable("mid_embedding_var", [n_mid, EMBEDDING_DIM], dtype=self.model_dtype)
+                    self.mid_embeddings_var = tf.compat.v1.get_variable("mid_embedding_var", [n_mid, EMBEDDING_DIM], dtype=self.input_dtype)
                     tf.compat.v1.summary.histogram('mid_embeddings_var', self.mid_embeddings_var)
                     self.mid_batch_embedded = tf.nn.embedding_lookup(self.mid_embeddings_var, self.mid_batch_ph)
                     self.mid_his_batch_embedded = tf.nn.embedding_lookup(self.mid_embeddings_var, self.mid_his_batch_ph)
                     if self.use_negsampling:
                         self.noclk_mid_his_batch_embedded = tf.nn.embedding_lookup(self.mid_embeddings_var, self.noclk_mid_batch_ph)
 
-                    self.cat_embeddings_var = tf.compat.v1.get_variable("cat_embedding_var", [n_cat, EMBEDDING_DIM], dtype=self.model_dtype)
+                    self.cat_embeddings_var = tf.compat.v1.get_variable("cat_embedding_var", [n_cat, EMBEDDING_DIM], dtype=self.input_dtype)
                     tf.compat.v1.summary.histogram('cat_embeddings_var', self.cat_embeddings_var)
                     self.cat_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.cat_batch_ph)
                     self.cat_his_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.cat_his_batch_ph)
@@ -113,61 +124,110 @@ class Model(object):
                         self.noclk_cat_his_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.noclk_cat_batch_ph)
             else:
                 print('embedding on ' + device)
-                self.uid_embeddings_var = tf.compat.v1.get_variable("uid_embedding_var", [n_uid, EMBEDDING_DIM], dtype=self.model_dtype)
+                self.uid_embeddings_var = tf.compat.v1.get_variable("uid_embedding_var", [n_uid, EMBEDDING_DIM], dtype=self.input_dtype)
                 tf.compat.v1.summary.histogram('uid_embeddings_var', self.uid_embeddings_var)
                 self.uid_batch_embedded = tf.nn.embedding_lookup(self.uid_embeddings_var, self.uid_batch_ph)
 
-                self.mid_embeddings_var = tf.compat.v1.get_variable("mid_embedding_var", [n_mid, EMBEDDING_DIM], dtype=self.model_dtype)
+                self.mid_embeddings_var = tf.compat.v1.get_variable("mid_embedding_var", [n_mid, EMBEDDING_DIM], dtype=self.input_dtype)
                 tf.compat.v1.summary.histogram('mid_embeddings_var', self.mid_embeddings_var)
                 self.mid_batch_embedded = tf.nn.embedding_lookup(self.mid_embeddings_var, self.mid_batch_ph)
                 self.mid_his_batch_embedded = tf.nn.embedding_lookup(self.mid_embeddings_var, self.mid_his_batch_ph)
                 if self.use_negsampling:
                     self.noclk_mid_his_batch_embedded = tf.nn.embedding_lookup(self.mid_embeddings_var, self.noclk_mid_batch_ph)
 
-                self.cat_embeddings_var = tf.compat.v1.get_variable("cat_embedding_var", [n_cat, EMBEDDING_DIM], dtype=self.model_dtype)
+                self.cat_embeddings_var = tf.compat.v1.get_variable("cat_embedding_var", [n_cat, EMBEDDING_DIM], dtype=self.input_dtype)
                 tf.compat.v1.summary.histogram('cat_embeddings_var', self.cat_embeddings_var)
                 self.cat_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.cat_batch_ph)
                 self.cat_his_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.cat_his_batch_ph)
                 if self.use_negsampling:
                     self.noclk_cat_his_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.noclk_cat_batch_ph)
 
-        self.item_eb = tf.concat([self.mid_batch_embedded, self.cat_batch_embedded], 1)
-        self.item_his_eb = tf.concat([self.mid_his_batch_embedded, self.cat_his_batch_embedded], 2)
-        self.item_his_eb_sum = tf.reduce_sum(self.item_his_eb, 1)
-        #import pdb; pdb.set_trace()
-        if self.use_negsampling:
-            self.noclk_item_his_eb = tf.concat(
-                [self.noclk_mid_his_batch_embedded[:, :, 0, :], self.noclk_cat_his_batch_embedded[:, :, 0, :]], -1)# 0 means only using the first negative item ID. 3 item IDs are inputed in the line 24.
-            self.noclk_item_his_eb = tf.reshape(self.noclk_item_his_eb,
-                                                [-1, tf.shape(self.noclk_mid_his_batch_embedded)[1], 36])# cat embedding 18 concate item embedding 18.
+        if self.model_dtype == tf.bfloat16:
+            tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+            with tf.compat.v1.tpu.bfloat16_scope():
+                # Enable BF16 Training
+                # TODO(yunfei): can we avoid bfloat16, do input cast in tf.compat.v1.get_variable
+                self.uid_batch_embedded = tf.cast(self.uid_batch_embedded, tf.bfloat16)
+                self.mid_batch_embedded = tf.cast(self.mid_batch_embedded, tf.bfloat16)
+                self.cat_batch_embedded = tf.cast(self.cat_batch_embedded, tf.bfloat16)
+                self.mid_his_batch_embedded = tf.cast(self.mid_his_batch_embedded, tf.bfloat16)
 
-            self.noclk_his_eb = tf.concat([self.noclk_mid_his_batch_embedded, self.noclk_cat_his_batch_embedded], -1)
-            self.noclk_his_eb_sum_1 = tf.reduce_sum(self.noclk_his_eb, 2)
-            self.noclk_his_eb_sum = tf.reduce_sum(self.noclk_his_eb_sum_1, 1)
+                self.item_eb = tf.concat([self.mid_batch_embedded, self.cat_batch_embedded], 1)
+                self.item_his_eb = tf.concat([self.mid_his_batch_embedded, self.mid_his_batch_embedded], 2)
+                self.item_his_eb_sum = tf.reduce_sum(self.item_his_eb, 1)
+                #import pdb; pdb.set_trace()
+                if self.use_negsampling:
+                    self.noclk_mid_his_batch_embedded = tf.cast(self.noclk_mid_his_batch_embedded, tf.bfloat16)
+                    self.noclk_cat_his_batch_embedded = tf.cast(self.noclk_cat_his_batch_embedded, tf.bfloat16)
+
+                    self.noclk_item_his_eb = tf.concat(
+                        [self.noclk_mid_his_batch_embedded[:, :, 0, :], self.noclk_cat_his_batch_embedded[:, :, 0, :]], -1)# 0 means only using the first negative item ID. 3 item IDs are inputed in the line 24.
+                    self.noclk_item_his_eb = tf.reshape(self.noclk_item_his_eb,
+                                                        [-1, tf.shape(self.noclk_mid_his_batch_embedded)[1], 36])# cat embedding 18 concate item embedding 18.
+
+                    self.noclk_his_eb = tf.concat([self.noclk_mid_his_batch_embedded, self.noclk_cat_his_batch_embedded], -1)
+                    self.noclk_his_eb_sum_1 = tf.reduce_sum(self.noclk_his_eb, 2)
+                    self.noclk_his_eb_sum = tf.reduce_sum(self.noclk_his_eb_sum_1, 1)
+
+        else:
+            self.item_eb = tf.concat([self.mid_batch_embedded, self.cat_batch_embedded], 1)
+            self.item_his_eb = tf.concat([self.mid_his_batch_embedded, self.cat_his_batch_embedded], 2)
+            self.item_his_eb_sum = tf.reduce_sum(self.item_his_eb, 1)
+            #import pdb; pdb.set_trace()
+            if self.use_negsampling:
+                self.noclk_item_his_eb = tf.concat(
+                    [self.noclk_mid_his_batch_embedded[:, :, 0, :], self.noclk_cat_his_batch_embedded[:, :, 0, :]], -1)# 0 means only using the first negative item ID. 3 item IDs are inputed in the line 24.
+                self.noclk_item_his_eb = tf.reshape(self.noclk_item_his_eb,
+                                                    [-1, tf.shape(self.noclk_mid_his_batch_embedded)[1], 36])# cat embedding 18 concate item embedding 18.
+
+                self.noclk_his_eb = tf.concat([self.noclk_mid_his_batch_embedded, self.noclk_cat_his_batch_embedded], -1)
+                self.noclk_his_eb_sum_1 = tf.reduce_sum(self.noclk_his_eb, 2)
+                self.noclk_his_eb_sum = tf.reduce_sum(self.noclk_his_eb_sum_1, 1)
 
     def build_fcn_net(self, inp, use_dice = False):
         def dtype_getter(getter, name, dtype=None, *args, **kwargs):
-            var = getter(name, dtype=self.model_dtype, *args, **kwargs)
+            var = getter(name, dtype=self.input_dtype, *args, **kwargs)
             return var
 
-        with tf.compat.v1.variable_scope("fcn", custom_getter=dtype_getter, dtype=self.model_dtype):
-            bn1 = tf.compat.v1.layers.batch_normalization(inputs=inp, name='bn1')
-            dnn1 = tf.compat.v1.layers.dense(bn1, 200, activation=None, name='f1')
-            if use_dice:
-                dnn1 = dice(dnn1, name='dice_1', data_type=self.model_dtype)
-            else:
-                dnn1 = prelu(dnn1, 'prelu1')
+        with tf.compat.v1.variable_scope("fcn", custom_getter=dtype_getter, dtype=self.input_dtype):
+            if self.model_dtype == tf.bfloat16:
+                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+                with tf.compat.v1.tpu.bfloat16_scope():
+                    bn1 = tf.compat.v1.layers.batch_normalization(inputs=inp, name='bn1')
+                    dnn1 = tf.compat.v1.layers.dense(bn1, 200, activation=None, name='f1')
+                    if use_dice:
+                        dnn1 = dice(dnn1, name='dice_1', data_type=self.model_dtype)
+                    else:
+                        dnn1 = prelu(dnn1, 'prelu1')
 
-            dnn2 = tf.compat.v1.layers.dense(dnn1, 80, activation=None, name='f2')
-            if use_dice:
-                dnn2 = dice(dnn2, name='dice_2', data_type=self.model_dtype)
+                    dnn2 = tf.compat.v1.layers.dense(dnn1, 80, activation=None, name='f2')
+                    if use_dice:
+                        dnn2 = dice(dnn2, name='dice_2', data_type=self.model_dtype)
+                    else:
+                        dnn2 = prelu(dnn2, 'prelu2')
+                     
+                # Enable BF16 Training, last MatMul will be better with FP32
+                dnn2 = tf.cast(dnn2, tf.float32)
+
             else:
-                dnn2 = prelu(dnn2, 'prelu2')
+                bn1 = tf.compat.v1.layers.batch_normalization(inputs=inp, name='bn1')
+                dnn1 = tf.compat.v1.layers.dense(bn1, 200, activation=None, name='f1')
+                if use_dice:
+                    dnn1 = dice(dnn1, name='dice_1', data_type=self.model_dtype)
+                else:
+                    dnn1 = prelu(dnn1, 'prelu1')
+
+                dnn2 = tf.compat.v1.layers.dense(dnn1, 80, activation=None, name='f2')
+                if use_dice:
+                    dnn2 = dice(dnn2, name='dice_2', data_type=self.model_dtype)
+                else:
+                    dnn2 = prelu(dnn2, 'prelu2')
+            
             dnn3 = tf.compat.v1.layers.dense(dnn2, 2, activation=None, name='f3')
             self.y_hat = tf.nn.softmax(dnn3) + 0.00000001
 
             with tf.name_scope("Metrics"):
-            #with tf.compat.v1.variable_scope("Metrics", custom_getter=dtype_getter, dtype=self.model_dtype):
+            #with tf.compat.v1.variable_scope("Metrics", custom_getter=dtype_getter, dtype=self.input_dtype):
                 # Cross-entropy loss and optimizer initialization
                 ctr_loss = - tf.reduce_mean(tf.math.log(self.y_hat) * self.target_ph)
                 self.loss = ctr_loss
@@ -176,21 +236,34 @@ class Model(object):
                 tf.compat.v1.summary.scalar('loss', self.loss)
                 self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
 
+                # # convert sparse optimizer to dense optimizer
+                # adam_optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=self.lr)
+                # gradients = adam_optimizer.compute_gradients(self.loss)
+                # gradients = self._sparse_to_dense_grads(gradients)
+                # self.optimizer = adam_optimizer.apply_gradients(gradients)
+
                 # Accuracy metric
-                self.accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(self.y_hat), self.target_ph), self.model_dtype))
+                self.accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(self.y_hat), self.target_ph), self.input_dtype))
                 tf.compat.v1.summary.scalar('accuracy', self.accuracy)
 
-            self.merged = tf.compat.v1.summary.merge_all()
+            self.merged =  tf.compat.v1.summary.merge_all()
 
     def auxiliary_loss(self, h_states, click_seq, noclick_seq, mask, stag = None):
         def dtype_getter(getter, name, dtype=None, *args, **kwargs):
-            var = getter(name, dtype=self.model_dtype, *args, **kwargs)
+            var = getter(name, dtype=self.input_dtype, *args, **kwargs)
             return var
 
-        with tf.compat.v1.variable_scope("aux_loss", custom_getter=dtype_getter, dtype=self.model_dtype):
-            mask = tf.cast(mask, self.model_dtype)
-            click_input_ = tf.concat([h_states, click_seq], -1)
-            noclick_input_ = tf.concat([h_states, noclick_seq], -1)
+        with tf.compat.v1.variable_scope("aux_loss", custom_getter=dtype_getter, dtype=self.input_dtype):
+            if self.model_dtype == tf.bfloat16:
+                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+                with tf.compat.v1.tpu.bfloat16_scope():
+                    mask = tf.cast(mask, self.input_dtype)
+                    click_input_ = tf.concat([h_states, click_seq], -1)
+                    noclick_input_ = tf.concat([h_states, noclick_seq], -1)
+            else:
+                mask = tf.cast(mask, self.input_dtype)
+                click_input_ = tf.concat([h_states, click_seq], -1)
+                noclick_input_ = tf.concat([h_states, noclick_seq], -1)
             click_prop_ = self.auxiliary_net(click_input_, stag = stag)[:, :, 0]
             noclick_prop_ = self.auxiliary_net(noclick_input_, stag = stag)[:, :, 0]
             click_loss_ = - tf.reshape(tf.math.log(click_prop_), [-1, tf.shape(click_seq)[1]]) * mask
@@ -200,15 +273,28 @@ class Model(object):
 
     def auxiliary_net(self, in_, stag='auxiliary_net'):
         def dtype_getter(getter, name, dtype=None, *args, **kwargs):
-            var = getter(name, dtype=self.model_dtype, *args, **kwargs)
+            var = getter(name, dtype=self.input_dtype, *args, **kwargs)
             return var
 
-        with tf.compat.v1.variable_scope("aux_net", custom_getter=dtype_getter, dtype=self.model_dtype):
-            bn1 = tf.compat.v1.layers.batch_normalization(inputs=in_, name='bn1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
-            dnn1 = tf.compat.v1.layers.dense(bn1, 100, activation=None, name='f1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
-            dnn1 = tf.nn.sigmoid(dnn1)
-            dnn2 = tf.compat.v1.layers.dense(dnn1, 50, activation=None, name='f2' + stag, reuse=tf.compat.v1.AUTO_REUSE)
-            dnn2 = tf.nn.sigmoid(dnn2)
+        with tf.compat.v1.variable_scope("aux_net", custom_getter=dtype_getter, dtype=self.input_dtype):
+            if self.model_dtype == tf.bfloat16:
+                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+                with tf.compat.v1.tpu.bfloat16_scope():
+                    bn1 = tf.compat.v1.layers.batch_normalization(inputs=in_, name='bn1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
+                    dnn1 = tf.compat.v1.layers.dense(bn1, 100, activation=None, name='f1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
+                    dnn1 = tf.nn.sigmoid(dnn1)
+                    dnn2 = tf.compat.v1.layers.dense(dnn1, 50, activation=None, name='f2' + stag, reuse=tf.compat.v1.AUTO_REUSE)
+                    dnn2 = tf.nn.sigmoid(dnn2)
+                
+                # Enable BF16 Training, last MatMul will be better with FP32
+                dnn2 = tf.cast(dnn2, tf.float32)
+            else:
+                bn1 = tf.compat.v1.layers.batch_normalization(inputs=in_, name='bn1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
+                dnn1 = tf.compat.v1.layers.dense(bn1, 100, activation=None, name='f1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
+                dnn1 = tf.nn.sigmoid(dnn1)
+                dnn2 = tf.compat.v1.layers.dense(dnn1, 50, activation=None, name='f2' + stag, reuse=tf.compat.v1.AUTO_REUSE)
+                dnn2 = tf.nn.sigmoid(dnn2)
+            
             dnn3 = tf.compat.v1.layers.dense(dnn2, 2, activation=None, name='f3' + stag, reuse=tf.compat.v1.AUTO_REUSE)
             y_hat = tf.nn.softmax(dnn3) + 0.00000001
             return y_hat
@@ -217,21 +303,44 @@ class Model(object):
         loss, accuracy, _ = sess.run([self.loss, self.accuracy, self.optimizer])
         return loss, accuracy, 0
 
-    def train(self, sess, inps):
+    def train(self, sess, inps, timeline_flag=False, options=None,run_metadata=None, step=None):
         if self.use_negsampling:
-            loss, accuracy, aux_loss, _ = sess.run([self.loss, self.accuracy, self.aux_loss, self.optimizer], feed_dict={
-                self.uid_batch_ph: inps[0],
-                self.mid_batch_ph: inps[1],
-                self.cat_batch_ph: inps[2],
-                self.mid_his_batch_ph: inps[3],
-                self.cat_his_batch_ph: inps[4],
-                self.mask: inps[5],
-                self.target_ph: inps[6],
-                self.seq_len_ph: inps[7],
-                self.lr: inps[8],
-                self.noclk_mid_batch_ph: inps[9],
-                self.noclk_cat_batch_ph: inps[10],
-            })
+            if timeline_flag:
+                loss, accuracy, aux_loss, _ = sess.run([self.loss, self.accuracy, self.aux_loss, self.optimizer], 
+                    options=options,run_metadata=run_metadata,
+                    feed_dict={
+                    self.uid_batch_ph: inps[0],
+                    self.mid_batch_ph: inps[1],
+                    self.cat_batch_ph: inps[2],
+                    self.mid_his_batch_ph: inps[3],
+                    self.cat_his_batch_ph: inps[4],
+                    self.mask: inps[5],
+                    self.target_ph: inps[6],
+                    self.seq_len_ph: inps[7],
+                    self.lr: inps[8],
+                    self.noclk_mid_batch_ph: inps[9],
+                    self.noclk_cat_batch_ph: inps[10],
+                })
+
+                fetched_timeline = timeline.Timeline(run_metadata.step_stats)
+                chrome_trace = fetched_timeline.generate_chrome_trace_format()
+
+                with open('./timeline/dien_train_timeline.json'.format(step), 'w') as f:
+                    f.write(chrome_trace)
+            else:
+                loss, accuracy, aux_loss, _ = sess.run([self.loss, self.accuracy, self.aux_loss, self.optimizer], feed_dict={
+                    self.uid_batch_ph: inps[0],
+                    self.mid_batch_ph: inps[1],
+                    self.cat_batch_ph: inps[2],
+                    self.mid_his_batch_ph: inps[3],
+                    self.cat_his_batch_ph: inps[4],
+                    self.mask: inps[5],
+                    self.target_ph: inps[6],
+                    self.seq_len_ph: inps[7],
+                    self.lr: inps[8],
+                    self.noclk_mid_batch_ph: inps[9],
+                    self.noclk_cat_batch_ph: inps[10],
+                })
             return loss, accuracy, aux_loss
         else:
             loss, accuracy, _ = sess.run([self.loss, self.accuracy, self.optimizer], feed_dict={
@@ -247,20 +356,36 @@ class Model(object):
             })
             return loss, accuracy, 0
 
-    def calculate(self, sess, inps):
+    def calculate(self, sess, inps, timeline=False, options=None,run_metadata=None):
         if self.use_negsampling:
-            probs, loss, accuracy, aux_loss = sess.run([self.y_hat, self.loss, self.accuracy, self.aux_loss], feed_dict={
-                self.uid_batch_ph: inps[0],
-                self.mid_batch_ph: inps[1],
-                self.cat_batch_ph: inps[2],
-                self.mid_his_batch_ph: inps[3],
-                self.cat_his_batch_ph: inps[4],
-                self.mask: inps[5],
-                self.target_ph: inps[6],
-                self.seq_len_ph: inps[7],
-                self.noclk_mid_batch_ph: inps[8],
-                self.noclk_cat_batch_ph: inps[9],
-            })
+            if timeline:
+                probs, loss, accuracy, aux_loss = sess.run(
+                    [self.y_hat, self.loss, self.accuracy, self.aux_loss], options=options,run_metadata=run_metadata, 
+                    feed_dict={
+                    self.uid_batch_ph: inps[0],
+                    self.mid_batch_ph: inps[1],
+                    self.cat_batch_ph: inps[2],
+                    self.mid_his_batch_ph: inps[3],
+                    self.cat_his_batch_ph: inps[4],
+                    self.mask: inps[5],
+                    self.target_ph: inps[6],
+                    self.seq_len_ph: inps[7],
+                    self.noclk_mid_batch_ph: inps[8],
+                    self.noclk_cat_batch_ph: inps[9],
+                })
+            else:
+                probs, loss, accuracy, aux_loss = sess.run([self.y_hat, self.loss, self.accuracy, self.aux_loss], feed_dict={
+                    self.uid_batch_ph: inps[0],
+                    self.mid_batch_ph: inps[1],
+                    self.cat_batch_ph: inps[2],
+                    self.mid_his_batch_ph: inps[3],
+                    self.cat_his_batch_ph: inps[4],
+                    self.mask: inps[5],
+                    self.target_ph: inps[6],
+                    self.seq_len_ph: inps[7],
+                    self.noclk_mid_batch_ph: inps[8],
+                    self.noclk_cat_batch_ph: inps[9],
+                })
             return probs, loss, accuracy, aux_loss
         else:
             probs, loss, accuracy = sess.run([self.y_hat, self.loss, self.accuracy], feed_dict={
@@ -370,7 +495,7 @@ class Model_WideDeep(Model):
             # Accuracy metric
             self.accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(self.y_hat), self.target_ph), tf.float32))
             tf.compat.v1.summary.scalar('accuracy', self.accuracy)
-        self.merged = tf.compat.v1.summary.merge_all()
+        self.merged =  tf.compat.v1.summary.merge_all()
 
 
 class Model_DIN_V2_Gru_QA_attGru(Model):
@@ -448,36 +573,68 @@ class Model_DIN_V2_Gru_Vec_attGru_Neg(Model):
                                                           EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type,
                                                           use_negsampling, synthetic_input, batch_size, max_length, device)
         def dtype_getter(getter, name, dtype=None, *args, **kwargs):
-            var = getter(name, dtype=self.model_dtype, *args, **kwargs)
+            var = getter(name, dtype=self.input_dtype, *args, **kwargs)
             return var
 
-        with tf.compat.v1.variable_scope("dien", custom_getter=dtype_getter, dtype=self.model_dtype):
-            # RNN layer(-s)
-            with tf.name_scope('rnn_1'):
-                rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=self.item_his_eb,
-                                             sequence_length=self.seq_len_ph, dtype=self.model_dtype,
-                                             scope="gru1")
-                tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
+        with tf.compat.v1.variable_scope("dien", custom_getter=dtype_getter, dtype=self.input_dtype):
+            if self.model_dtype == tf.bfloat16:
+                # RNN layer(-s)
+                with tf.name_scope('rnn_1'):
+                    # Enable BF16 
+                    tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+                    with tf.compat.v1.tpu.bfloat16_scope():
+                        rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=self.item_his_eb,
+                                                    sequence_length=self.seq_len_ph, dtype=self.model_dtype,
+                                                    scope="gru1")
+                        tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
+            else:
+                # RNN layer(-s)
+                with tf.name_scope('rnn_1'):
+                    rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=self.item_his_eb,
+                                                sequence_length=self.seq_len_ph, dtype=self.model_dtype,
+                                                scope="gru1")
+                    tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
 
             aux_loss_1 = self.auxiliary_loss(rnn_outputs[:, :-1, :], self.item_his_eb[:, 1:, :],
-                                             self.noclk_item_his_eb[:, 1:, :],
-                                             self.mask[:, 1:], stag="gru")
+                                    self.noclk_item_his_eb[:, 1:, :],
+                                    self.mask[:, 1:], stag="gru")
             self.aux_loss = aux_loss_1
 
-            # Attention layer
-            with tf.name_scope('Attention_layer_1'):
-                att_outputs, alphas = din_fcn_attention(self.item_eb, rnn_outputs, ATTENTION_SIZE, self.mask,
-                                                        softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
-                tf.compat.v1.summary.histogram('alpha_outputs', alphas)
+            if self.model_dtype == tf.bfloat16:
+                # Enable BF16 
+                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+                with tf.compat.v1.tpu.bfloat16_scope():
+                    # Attention layer
+                    with tf.name_scope('Attention_layer_1'):
+                        att_outputs, alphas = din_fcn_attention(self.item_eb, rnn_outputs, ATTENTION_SIZE, self.mask,
+                                                                softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
+                        tf.compat.v1.summary.histogram('alpha_outputs', alphas)
 
-            with tf.name_scope('rnn_2'):
-                rnn_outputs2, final_state2 = dynamic_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
-                                                         att_scores = tf.expand_dims(alphas, -1),
-                                                         sequence_length=self.seq_len_ph, dtype=self.model_dtype,
-                                                         scope="gru2")
-                tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
+                    with tf.name_scope('rnn_2'):
+                        rnn_outputs2, final_state2 = dynamic_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
+                                                                att_scores = tf.expand_dims(alphas, -1),
+                                                                sequence_length=self.seq_len_ph, dtype=self.model_dtype,
+                                                                scope="gru2")
+                        tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
 
-            inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
+                    inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
+            
+            else:
+                # Attention layer
+                with tf.name_scope('Attention_layer_1'):
+                    att_outputs, alphas = din_fcn_attention(self.item_eb, rnn_outputs, ATTENTION_SIZE, self.mask,
+                                                            softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
+                    tf.compat.v1.summary.histogram('alpha_outputs', alphas)
+
+                with tf.name_scope('rnn_2'):
+                    rnn_outputs2, final_state2 = dynamic_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
+                                                            att_scores = tf.expand_dims(alphas, -1),
+                                                            sequence_length=self.seq_len_ph, dtype=self.model_dtype,
+                                                            scope="gru2")
+                    tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
+
+                inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
+            
             self.build_fcn_net(inp, use_dice=True)
 
 

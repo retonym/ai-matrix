@@ -1,5 +1,16 @@
 #!/bin/bash
 
+export TF_NUM_INTEROP_THREADS=1
+
+# for ats
+export ZE_AFFINITY_MASK=0.0
+export SYCL_DEVICE_FILTER={level_zero:gpu:0}
+export SYCL_PI_LEVEL_ZERO_BATCH_SIZE=1
+
+export UseVmBind=1
+export EnableDirectSubmission=1
+
+
 NUM_ACCELERATORS=${NUM_ACCELERATORS:-1}
 echo "NUM_ACCELERATORS=${NUM_ACCELERATORS}"
 TOTAL_RECOMMDS=512000
@@ -12,7 +23,10 @@ if [ -d results ]; then
 fi
 mkdir results
 
-batchs='256 512 1024'
+# batchs='256 512 1024'
+batchs=128
+manner=benchmark
+data_type=FP32
 
 for batch in $batchs
 do
@@ -20,7 +34,7 @@ do
 	echo "Running training with batch size of $batch"
 	echo "----------------------------------------------------------------"
 	start=`date +%s%N`
-	python script/train.py --mode=train --batch_size=$batch |& tee results/result_train_${batch}.txt
+    python script/train.py --mode=train --batch_size=$batch --manner=$manner --data_type=$data_type |& tee results/result_train_${batch}.txt
 	end=`date +%s%N`
 	total_time=$(((end-start)/1000000))
     #total_time=`bc <<< "scale = 3; ($end-$start)/1000000000"`

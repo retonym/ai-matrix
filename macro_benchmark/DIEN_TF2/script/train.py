@@ -8,14 +8,24 @@ import sys
 from utils import *
 
 import argparse
+
+from tensorflow.python.client import timeline
+from tensorflow.python.platform import gfile
+
+import os
+import pickle
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", type=str, default='train', help="mode, train or test")
 parser.add_argument("--model", type=str, default='DIEN', help="model")
 parser.add_argument("--seed", type=int, default=3, help="seed value")
 parser.add_argument("--batch_size", type=int, default=128, help="batch size")
-parser.add_argument("--data_type", type=str, default='FP32', help="data type: FP32 or FP16")
+parser.add_argument("--data_type", type=str, default='FP32', help="data type: FP32, FP16 or BF16")
 parser.add_argument("--num_accelerators", type=int, default=1, help="number of accelerators used for training")
 parser.add_argument("--embedding_device", type=str, default='gpu', help="synthetic input embedding layer reside on gpu or cpu")
+parser.add_argument("--num-intra-threads", type=int, dest="num_intra_threads", default=None, help="num-intra-threads")
+parser.add_argument("--num-inter-threads", type=int, dest="num_inter_threads", default=None, help="num-inter-threads")
+parser.add_argument("--manner", type=str, default="benchmark", help="timeline")
 args = parser.parse_args()
 
 EMBEDDING_DIM = 18
@@ -24,7 +34,8 @@ ATTENTION_SIZE = 18 * 2
 best_auc = 0.0
 
 TOTAL_TRAIN_SIZE = 512000
-#TOTAL_TRAIN_SIZE = 16000
+BENCHMARK_ITERATION = 10
+TRAIN_ITERATION = 400
 
 
 def prepare_data(input, target, maxlen = None, return_neg = False):
@@ -75,6 +86,10 @@ def prepare_data(input, target, maxlen = None, return_neg = False):
         data_type = 'float32'
     elif args.data_type == 'FP16':
         data_type = 'float16'
+    elif args.data_type == 'BF16':
+        # For BF16 training, currently we still use FP32 as dataset input
+        # TODO(yunfei): can we directly load dataset with BF16
+        data_type = 'float32'
     else:
         raise ValueError("Invalid model data type: %s" % args.data_type)
     mid_mask = numpy.zeros((n_samples, maxlen_x)).astype(data_type)
@@ -212,7 +227,7 @@ def train(
         cat_voc = "cat_voc.pkl",
         batch_size = 128,
         maxlen = 100,
-        test_iter = 100,
+        test_iter = 3,
         save_iter = 100,
         model_type = 'DNN',
         data_type = 'FP32',
@@ -223,7 +238,7 @@ def train(
     model_path = "dnn_save_path/ckpt_noshuff" + model_type + str(seed)
     best_model_path = "dnn_best_model/ckpt_noshuff" + model_type + str(seed)
     gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
-    with tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options, log_device_placement=True)) as sess:
+    with tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options, log_device_placement=False)) as sess:
         train_data = DataIterator(train_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen, shuffle_each_epoch=False)
         test_data = DataIterator(test_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen)
         n_uid, n_mid, n_cat = train_data.get_n()
@@ -271,14 +286,27 @@ def train(
             loss_sum = 0.0
             accuracy_sum = 0.
             aux_loss_sum = 0.
+
+            options = tf.compat.v1.RunOptions(trace_level=tf.compat.v1.RunOptions.FULL_TRACE)
+            run_metadata = tf.compat.v1.RunMetadata()
+            elapsed_time_records = []
+
+            total_data = []
+
             for src, tgt in train_data:
                 
                 uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(src, tgt, maxlen, return_neg=True)
                 start_time = time.time()
-                loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats])
+                if iter == test_iter and args.manner == "timeline":
+                    loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats],
+                                                timeline_flag=True, options=options,run_metadata=run_metadata, step=iter)
+                else:
+                    loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats])
                 end_time = time.time()
                 # print("training time of one batch: %.3f" % (end_time - start_time))
                 approximate_accelerator_time += end_time - start_time
+                elapsed_time_records.append(end_time - start_time)
+
                 loss_sum += loss
                 accuracy_sum += acc
                 aux_loss_sum += aux_loss
@@ -290,22 +318,27 @@ def train(
                     # print("approximate_accelerator_time: %.3f" % approximate_accelerator_time)
                     print('iter: %d ----> train_loss: %.4f ---- train_accuracy: %.4f ---- train_aux_loss: %.4f' % \
                                         (iter, loss_sum / test_iter, accuracy_sum / test_iter, aux_loss_sum / test_iter))
-                    print(' test_auc: %.4f ----test_loss: %.4f ---- test_accuracy: %.4f ---- test_aux_loss: %.4f ---- eval_time: %.3f ---- num_iters: %d' % eval(sess, test_data, model, best_model_path))
+                    # delete test every 100 iterations no need in training time
+                    # print(' test_auc: %.4f ----test_loss: %.4f ---- test_accuracy: %.4f ---- test_aux_loss: %.4f ---- eval_time: %.3f ---- num_iters: %d' % eval(sess, test_data, model, best_model_path))
                     loss_sum = 0.0
                     accuracy_sum = 0.0
                     aux_loss_sum = 0.0
                 if (iter % save_iter) == 0:
                     print('save model iter: %d' %(iter))
                     model.save(sess, model_path+"--"+str(iter))
-                if train_size >= TOTAL_TRAIN_SIZE:
+
+                if iter >= BENCHMARK_ITERATION:
                     break
+                
+            print("iteration: ", iter)
+
             lr *= 0.5
             if train_size >= TOTAL_TRAIN_SIZE:
                 break
         print("iter: %d" % iter)
-        print("Total recommendations: %d" % TOTAL_TRAIN_SIZE)
+        print("Total recommendations: %d" % (BENCHMARK_ITERATION * batch_size))
         print("Approximate accelerator time in seconds is %.3f" % approximate_accelerator_time)
-        print("Approximate accelerator performance in recommendations/second is %.3f" % (float(TOTAL_TRAIN_SIZE)/float(approximate_accelerator_time)))
+        print("Approximate accelerator performance in recommendations/second is %.3f" % (float(BENCHMARK_ITERATION * batch_size)/float(approximate_accelerator_time)))
 
 def test(
         train_file = "local_train_splitByUser",
