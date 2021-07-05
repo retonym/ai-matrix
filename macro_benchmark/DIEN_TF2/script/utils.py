@@ -1,12 +1,10 @@
 import tensorflow as tf
 from tensorflow.python.ops.rnn_cell import *
 #from tensorflow.python.ops.rnn_cell_impl import  _Linear
-from tensorflow import keras
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variable_scope as vs
-from keras import backend as K
 
 from tensorflow.python.util import nest
 from tensorflow.python.ops import nn_ops

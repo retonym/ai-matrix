@@ -223,7 +223,7 @@ def train(
     model_path = "dnn_save_path/ckpt_noshuff" + model_type + str(seed)
     best_model_path = "dnn_best_model/ckpt_noshuff" + model_type + str(seed)
     gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
-    with tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options)) as sess:
+    with tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options, log_device_placement=True)) as sess:
         train_data = DataIterator(train_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen, shuffle_each_epoch=False)
         test_data = DataIterator(test_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen)
         n_uid, n_mid, n_cat = train_data.get_n()
@@ -396,8 +396,8 @@ def test(
         print("Approximate accelerator performance in recommendations/second is %.3f" % (float(5*num_iters*batch_size)/float(approximate_accelerator_time)))
 
 if __name__ == '__main__':
-    if tf.__version__[0] == '2':
-        tf.compat.v1.disable_v2_behavior()
+    # if tf.__version__[0] == '2':
+    #     tf.compat.v1.disable_v2_behavior()
     SEED = args.seed
     if tf.__version__[0] == '1':
         tf.compat.v1.set_random_seed(SEED)  
