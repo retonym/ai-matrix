@@ -142,6 +142,12 @@ class Model(object):
                 if self.use_negsampling:
                     self.noclk_cat_his_batch_embedded = tf.nn.embedding_lookup(self.cat_embeddings_var, self.noclk_cat_batch_ph)
 
+                # self.uid_batch_embedded = tf.compat.v1.Print(self.uid_batch_embedded, [tf.shape(self.uid_batch_embedded)], 'self.uid_batch_embedded shape: ')
+                # self.mid_batch_embedded = tf.compat.v1.Print(self.mid_batch_embedded, [tf.shape(self.mid_batch_embedded)], 'self.mid_batch_embedded shape: ')
+                # self.mid_his_batch_embedded = tf.compat.v1.Print(self.mid_his_batch_embedded, [tf.shape(self.mid_his_batch_embedded)], 'self.mid_his_batch_embedded shape: ')
+                # self.cat_batch_embedded = tf.compat.v1.Print(self.cat_batch_embedded, [tf.shape(self.cat_batch_embedded)], 'self.cat_batch_embedded shape: ')
+                # self.cat_his_batch_embedded = tf.compat.v1.Print(self.cat_his_batch_embedded, [tf.shape(self.cat_his_batch_embedded)], 'self.cat_his_batch_embedded shape: ')
+
         if self.model_dtype == tf.bfloat16:
             tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
             with tf.compat.v1.tpu.bfloat16_scope():
