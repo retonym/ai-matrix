@@ -15,6 +15,18 @@ from tensorflow.python.platform import gfile
 import os
 import pickle
 
+import distutils
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", type=str, default='train', help="mode, train or test")
 parser.add_argument("--model", type=str, default='DIEN', help="model")
@@ -26,6 +38,7 @@ parser.add_argument("--embedding_device", type=str, default='gpu', help="synthet
 parser.add_argument("--num-intra-threads", type=int, dest="num_intra_threads", default=None, help="num-intra-threads")
 parser.add_argument("--num-inter-threads", type=int, dest="num_inter_threads", default=None, help="num-inter-threads")
 parser.add_argument("--manner", type=str, default="benchmark", help="timeline")
+parser.add_argument("--use_static_rnn", type=str2bool, default=False, help="Use Static RNN API instead of Dynamic one")
 args = parser.parse_args()
 
 EMBEDDING_DIM = 18
@@ -37,8 +50,7 @@ TOTAL_TRAIN_SIZE = 512000
 BENCHMARK_ITERATION = int(os.environ["iteration"])
 TRAIN_ITERATION = 400
 
-
-def prepare_data(input, target, maxlen = None, return_neg = False):
+def prepare_data(input, target, use_static_rnn, maxlen = None, return_neg = False):
     # x: a list of sentences
     lengths_x = [len(s[4]) for s in input]
     seqs_mid = [inp[3] for inp in input]
@@ -74,7 +86,7 @@ def prepare_data(input, target, maxlen = None, return_neg = False):
             return None, None, None, None
     
     n_samples = len(seqs_mid)
-    maxlen_x = numpy.max(lengths_x)
+    maxlen_x = maxlen if use_static_rnn else numpy.max(lengths_x)
     neg_samples = len(noclk_seqs_mid[0][0])
 
 
@@ -104,13 +116,15 @@ def prepare_data(input, target, maxlen = None, return_neg = False):
     mids = numpy.array([inp[1] for inp in input])
     cats = numpy.array([inp[2] for inp in input])
 
+    # print ("mid_his shape: {}".format(mid_his.shape))
+    # print ("cat_his shape: {}".format(cat_his.shape))
     if return_neg:
         return uids, mids, cats, mid_his, cat_his, mid_mask, numpy.array(target), numpy.array(lengths_x), noclk_mid_his, noclk_cat_his
 
     else:
         return uids, mids, cats, mid_his, cat_his, mid_mask, numpy.array(target), numpy.array(lengths_x)
 
-def eval(sess, test_data, model, model_path):
+def eval(sess, test_data, model, model_path, maxlen=None):
     loss_sum = 0.
     accuracy_sum = 0.
     aux_loss_sum = 0.
@@ -120,7 +134,7 @@ def eval(sess, test_data, model, model_path):
     for src, tgt in test_data:
         nums += 1
         sys.stdout.flush()
-        uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(src, tgt, return_neg=True)
+        uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(src, tgt, args.use_static_rnn, maxlen=maxlen, return_neg=True)
         # print("begin evaluation")
         start_time = time.time()
         prob, loss, acc, aux_loss = model.calculate(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats])
@@ -147,6 +161,7 @@ def eval(sess, test_data, model, model_path):
         if args.mode == 'train':
             model.save(sess, model_path)
     return test_auc, loss_sum, accuracy_sum, aux_loss_sum, eval_time, nums
+
 def train_synthetic(   
         batch_size = 128,
         maxlen = 100,
@@ -186,7 +201,7 @@ def train_synthetic(
         elif model_type == 'DIN-V2-gru-vec-attGru':
             model = Model_DIN_V2_Gru_Vec_attGru(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
         elif model_type == 'DIEN':
-            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type, 
+            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, args.use_static_rnn, data_type, 
             synthetic_input = synthetic_input, batch_size = batch_size, max_length = maxlen, device = embedding_device)
         else:
             print ("Invalid model_type : %s", model_type)
@@ -261,7 +276,7 @@ def train(
         elif model_type == 'DIN-V2-gru-vec-attGru':
             model = Model_DIN_V2_Gru_Vec_attGru(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
         elif model_type == 'DIEN':
-            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type, 
+            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, args.use_static_rnn, data_type, 
             batch_size = batch_size, max_length = maxlen)
         else:
             print ("Invalid model_type : %s", model_type)
@@ -295,7 +310,7 @@ def train(
 
             for src, tgt in train_data:
                 
-                uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(src, tgt, maxlen, return_neg=True)
+                uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(src, tgt, args.use_static_rnn, maxlen, return_neg=True)
                 start_time = time.time()
                 if iter == test_iter and args.manner == "timeline":
                     loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats],
@@ -377,7 +392,7 @@ def test(
         elif model_type == 'DIN-V2-gru-vec-attGru':
             model = Model_DIN_V2_Gru_Vec_attGru(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
         elif model_type == 'DIEN':
-            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type)
+            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, args.use_static_rnn, data_type, max_length=maxlen)
         else:
             print ("Invalid model_type : %s", model_type)
             return

@@ -3,7 +3,6 @@ import tensorflow as tf
 def dice(_x, axis=-1, epsilon=0.000000001, name='', data_type = tf.float32):
   with tf.compat.v1.variable_scope(name, reuse=tf.compat.v1.AUTO_REUSE):
     if data_type == tf.bfloat16:
-      tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
       with tf.compat.v1.tpu.bfloat16_scope():
         # TODO(yunfei): check this alphas, can it be FP32
         alphas = tf.compat.v1.get_variable('alpha'+name, _x.get_shape()[-1],

@@ -5,6 +5,7 @@ from tensorflow.python.ops.rnn_cell import LSTMCell
 from tensorflow.python.ops.rnn import bidirectional_dynamic_rnn as bi_rnn
 #from tensorflow.python.ops.rnn import dynamic_rnn
 from rnn import dynamic_rnn
+from rnn import static_rnn
 from utils import *
 from Dice import dice
 import numpy as np
@@ -13,11 +14,12 @@ from tensorflow.python.client import timeline
 from tensorflow.python.platform import gfile
 
 class Model(object):
-    def __init__(self, n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, 
+    def __init__(self, n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, use_static_rnn=False, 
      data_type='FP32', use_negsampling = False, synthetic_input = False, batch_size = 32,
      max_length=100, device = 'gpu'):
         self.synthetic_input = synthetic_input
         self.seq_len_ph = np.ones((batch_size)) * max_length
+        self.use_static_rnn = use_static_rnn
 
         if data_type == 'FP32':
             self.model_dtype = tf.float32
@@ -86,8 +88,8 @@ class Model(object):
                         name='noclk_cat_batch_ph') 
         else:
             with tf.name_scope('Inputs'):
-                self.mid_his_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, None], name='mid_his_batch_ph')
-                self.cat_his_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, None], name='cat_his_batch_ph')
+                self.mid_his_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, max_length if self.use_static_rnn else None], name='mid_his_batch_ph')
+                self.cat_his_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, max_length if self.use_static_rnn else None], name='cat_his_batch_ph')
                 self.uid_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, ], name='uid_batch_ph')
                 self.mid_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, ], name='mid_batch_ph')
                 self.cat_batch_ph = tf.compat.v1.placeholder(tf.int32, [None, ], name='cat_batch_ph')
@@ -149,7 +151,6 @@ class Model(object):
                 # self.cat_his_batch_embedded = tf.compat.v1.Print(self.cat_his_batch_embedded, [tf.shape(self.cat_his_batch_embedded)], 'self.cat_his_batch_embedded shape: ')
 
         if self.model_dtype == tf.bfloat16:
-            tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
             with tf.compat.v1.tpu.bfloat16_scope():
                 # Enable BF16 Training
                 # TODO(yunfei): can we avoid bfloat16, do input cast in tf.compat.v1.get_variable
@@ -198,7 +199,6 @@ class Model(object):
 
         with tf.compat.v1.variable_scope("fcn", custom_getter=dtype_getter, dtype=self.input_dtype):
             if self.model_dtype == tf.bfloat16:
-                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
                 with tf.compat.v1.tpu.bfloat16_scope():
                     bn1 = tf.compat.v1.layers.batch_normalization(inputs=inp, name='bn1')
                     dnn1 = tf.compat.v1.layers.dense(bn1, 200, activation=None, name='f1')
@@ -262,7 +262,6 @@ class Model(object):
 
         with tf.compat.v1.variable_scope("aux_loss", custom_getter=dtype_getter, dtype=self.input_dtype):
             if self.model_dtype == tf.bfloat16:
-                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
                 with tf.compat.v1.tpu.bfloat16_scope():
                     mask = tf.cast(mask, self.input_dtype)
                     click_input_ = tf.concat([h_states, click_seq], -1)
@@ -285,7 +284,6 @@ class Model(object):
 
         with tf.compat.v1.variable_scope("aux_net", custom_getter=dtype_getter, dtype=self.input_dtype):
             if self.model_dtype == tf.bfloat16:
-                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
                 with tf.compat.v1.tpu.bfloat16_scope():
                     bn1 = tf.compat.v1.layers.batch_normalization(inputs=in_, name='bn1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
                     dnn1 = tf.compat.v1.layers.dense(bn1, 100, activation=None, name='f1' + stag, reuse=tf.compat.v1.AUTO_REUSE)
@@ -574,43 +572,130 @@ class Model_DIN(Model):
 
 
 class Model_DIN_V2_Gru_Vec_attGru_Neg(Model):
-    def __init__(self, n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type='FP32', 
+    def __init__(self, n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, use_static_rnn, data_type='FP32', 
         use_negsampling=True, synthetic_input = False, batch_size = 32, max_length=100, device = 'gpu'):
         super(Model_DIN_V2_Gru_Vec_attGru_Neg, self).__init__(n_uid, n_mid, n_cat,
-                                                          EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type,
+                                                          EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, use_static_rnn, data_type,
                                                           use_negsampling, synthetic_input, batch_size, max_length, device)
         def dtype_getter(getter, name, dtype=None, *args, **kwargs):
             var = getter(name, dtype=self.input_dtype, *args, **kwargs)
             return var
 
         with tf.compat.v1.variable_scope("dien", custom_getter=dtype_getter, dtype=self.input_dtype):
-            if self.model_dtype == tf.bfloat16:
-                # RNN layer(-s)
-                with tf.name_scope('rnn_1'):
-                    # Enable BF16 
-                    tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+            if self.use_static_rnn:
+                if self.model_dtype == tf.bfloat16:
                     with tf.compat.v1.tpu.bfloat16_scope():
-                        rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=self.item_his_eb,
-                                                    sequence_length=self.seq_len_ph, dtype=self.model_dtype,
-                                                    scope="gru1")
+                        # RNN layer(-s)
+                        with tf.name_scope('rnn_1'):
+                            inputs_list = tf.unstack(self.item_his_eb, axis=1)
+                            rnn_outputs, _ = static_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=inputs_list,
+                                                        # sequence_length=self.seq_len_ph, 
+                                                        dtype=self.model_dtype,
+                                                        scope="gru1")
+                            stacked_rnn_outputs = tf.stack(rnn_outputs, axis=1) 
                         tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
-            else:
-                # RNN layer(-s)
-                with tf.name_scope('rnn_1'):
-                    rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=self.item_his_eb,
-                                                sequence_length=self.seq_len_ph, dtype=self.model_dtype,
-                                                scope="gru1")
+
+                    aux_loss_1 = self.auxiliary_loss(stacked_rnn_outputs[:, :-1, :], self.item_his_eb[:, 1:, :],
+                                            self.noclk_item_his_eb[:, 1:, :],
+                                            self.mask[:, 1:], stag="gru")
+                    self.aux_loss = aux_loss_1
+
+                    with tf.compat.v1.tpu.bfloat16_scope():
+                        # Attention layer
+                        with tf.name_scope('Attention_layer_1'):
+                            att_outputs, alphas = din_fcn_attention(self.item_eb, stacked_rnn_outputs, ATTENTION_SIZE, self.mask,
+                                                                    softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
+                            tf.compat.v1.summary.histogram('alpha_outputs', alphas)
+
+                        with tf.name_scope('rnn_2'):
+                            rnn_outputs2, final_state2 = static_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
+                                                                    att_scores = tf.expand_dims(alphas, -1),
+                                                                    # sequence_length=self.seq_len_ph, 
+                                                                    dtype=self.model_dtype,
+                                                                    scope="gru2")                        
+                            tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
+
+                    inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
+                    self.build_fcn_net(inp, use_dice=True)
+                else:
+                    # RNN layer(-s)
+                    with tf.name_scope('rnn_1'):
+                        inputs_list = tf.unstack(self.item_his_eb, axis=1)
+                        rnn_outputs, _ = static_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=inputs_list,
+                                                    # sequence_length=self.seq_len_ph, 
+                                                    dtype=self.model_dtype,
+                                                    scope="gru1")
+                        stacked_rnn_outputs = tf.stack(rnn_outputs, axis=1) 
                     tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
 
-            aux_loss_1 = self.auxiliary_loss(rnn_outputs[:, :-1, :], self.item_his_eb[:, 1:, :],
-                                    self.noclk_item_his_eb[:, 1:, :],
-                                    self.mask[:, 1:], stag="gru")
-            self.aux_loss = aux_loss_1
+                    aux_loss_1 = self.auxiliary_loss(stacked_rnn_outputs[:, :-1, :], self.item_his_eb[:, 1:, :],
+                                            self.noclk_item_his_eb[:, 1:, :],
+                                            self.mask[:, 1:], stag="gru")
+                    self.aux_loss = aux_loss_1
 
-            if self.model_dtype == tf.bfloat16:
-                # Enable BF16 
-                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
-                with tf.compat.v1.tpu.bfloat16_scope():
+                    # Attention layer
+                    with tf.name_scope('Attention_layer_1'):
+                        att_outputs, alphas = din_fcn_attention(self.item_eb, stacked_rnn_outputs, ATTENTION_SIZE, self.mask,
+                                                                softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
+                        tf.compat.v1.summary.histogram('alpha_outputs', alphas)
+
+                    with tf.name_scope('rnn_2'):
+                        rnn_outputs2, final_state2 = static_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
+                                                                att_scores = tf.expand_dims(alphas, -1),
+                                                                # sequence_length=self.seq_len_ph, 
+                                                                dtype=self.model_dtype,
+                                                                scope="gru2")                        
+                        tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
+
+                    inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
+                    self.build_fcn_net(inp, use_dice=True)
+            else:
+                if self.model_dtype == tf.bfloat16:
+                    with tf.compat.v1.tpu.bfloat16_scope():
+                        # RNN layer(-s)
+                        with tf.name_scope('rnn_1'):
+                            rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=self.item_his_eb,
+                                                        sequence_length=self.seq_len_ph, 
+                                                        dtype=self.model_dtype,
+                                                        scope="gru1")
+                        tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
+
+                    aux_loss_1 = self.auxiliary_loss(rnn_outputs[:, :-1, :], self.item_his_eb[:, 1:, :],
+                                            self.noclk_item_his_eb[:, 1:, :],
+                                            self.mask[:, 1:], stag="gru")
+                    self.aux_loss = aux_loss_1
+
+                    with tf.compat.v1.tpu.bfloat16_scope():
+                        # Attention layer
+                        with tf.name_scope('Attention_layer_1'):
+                            att_outputs, alphas = din_fcn_attention(self.item_eb, rnn_outputs, ATTENTION_SIZE, self.mask,
+                                                                    softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
+                            tf.compat.v1.summary.histogram('alpha_outputs', alphas)
+
+                        with tf.name_scope('rnn_2'):
+                            rnn_outputs2, final_state2 = dynamic_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
+                                                                    att_scores = tf.expand_dims(alphas, -1),
+                                                                    sequence_length=self.seq_len_ph, 
+                                                                    dtype=self.model_dtype,
+                                                                    scope="gru2")                        
+                            tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
+
+                    inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
+                    self.build_fcn_net(inp, use_dice=True)
+                else:
+                    # RNN layer(-s)
+                    with tf.name_scope('rnn_1'):
+                        rnn_outputs, _ = dynamic_rnn(tf.compat.v1.nn.rnn_cell.GRUCell(HIDDEN_SIZE), inputs=inputs_list,
+                                                    sequence_length=self.seq_len_ph, 
+                                                    dtype=self.model_dtype,
+                                                    scope="gru1")
+                    tf.compat.v1.summary.histogram('GRU_outputs', rnn_outputs)
+
+                    aux_loss_1 = self.auxiliary_loss(rnn_outputs[:, :-1, :], self.item_his_eb[:, 1:, :],
+                                            self.noclk_item_his_eb[:, 1:, :],
+                                            self.mask[:, 1:], stag="gru")
+                    self.aux_loss = aux_loss_1
+
                     # Attention layer
                     with tf.name_scope('Attention_layer_1'):
                         att_outputs, alphas = din_fcn_attention(self.item_eb, rnn_outputs, ATTENTION_SIZE, self.mask,
@@ -620,30 +705,13 @@ class Model_DIN_V2_Gru_Vec_attGru_Neg(Model):
                     with tf.name_scope('rnn_2'):
                         rnn_outputs2, final_state2 = dynamic_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
                                                                 att_scores = tf.expand_dims(alphas, -1),
-                                                                sequence_length=self.seq_len_ph, dtype=self.model_dtype,
-                                                                scope="gru2")
+                                                                sequence_length=self.seq_len_ph, 
+                                                                dtype=self.model_dtype,
+                                                                scope="gru2")                        
                         tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
 
                     inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
-            
-            else:
-                # Attention layer
-                with tf.name_scope('Attention_layer_1'):
-                    att_outputs, alphas = din_fcn_attention(self.item_eb, rnn_outputs, ATTENTION_SIZE, self.mask,
-                                                            softmax_stag=1, stag='1_1', mode='LIST', return_alphas=True)
-                    tf.compat.v1.summary.histogram('alpha_outputs', alphas)
-
-                with tf.name_scope('rnn_2'):
-                    rnn_outputs2, final_state2 = dynamic_rnn(VecAttGRUCell(HIDDEN_SIZE), inputs=rnn_outputs,
-                                                            att_scores = tf.expand_dims(alphas, -1),
-                                                            sequence_length=self.seq_len_ph, dtype=self.model_dtype,
-                                                            scope="gru2")
-                    tf.compat.v1.summary.histogram('GRU2_Final_State', final_state2)
-
-                inp = tf.concat([self.uid_batch_embedded, self.item_eb, self.item_his_eb_sum, self.item_eb * self.item_his_eb_sum, final_state2], 1)
-            
-            self.build_fcn_net(inp, use_dice=True)
-
+                    self.build_fcn_net(inp, use_dice=True)
 
 class Model_DIN_V2_Gru_Vec_attGru(Model):
     def __init__(self, n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, use_negsampling=False,

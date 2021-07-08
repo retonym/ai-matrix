@@ -13,6 +13,68 @@ from tensorflow.python.ops import nn_ops
 _BIAS_VARIABLE_NAME = "bias"
 _WEIGHTS_VARIABLE_NAME = "kernel"
 
+def reshape_to_matrix(input_tensor):
+  """Reshapes a >= rank 2 tensor to a rank 2 tensor (i.e., a matrix)."""
+  ndims = input_tensor.shape.ndims
+  if ndims < 2:
+    raise ValueError("Input tensor must have at least rank 2. Shape = %s" %
+                     (input_tensor.shape))
+  if ndims == 2:
+    return input_tensor
+
+  width = input_tensor.shape[-1]
+  output_tensor = tf.reshape(input_tensor, [-1, width])
+  return output_tensor
+
+
+def get_shape_list(tensor, expected_rank=None, name=None):
+  """Returns a list of the shape of tensor, preferring static dimensions.
+  Args:
+    tensor: A tf.Tensor object to find the shape of.
+    expected_rank: (optional) int. The expected rank of `tensor`. If this is
+      specified and the `tensor` has a different rank, and exception will be
+      thrown.
+    name: Optional name of the tensor for the error message.
+  Returns:
+    A list of dimensions of the shape of tensor. All static dimensions will
+    be returned as python integers, and dynamic dimensions will be returned
+    as tf.Tensor scalars.
+  """
+  if name is None:
+    name = tensor.name
+
+  if expected_rank is not None:
+    assert_rank(tensor, expected_rank, name)
+
+  shape = tensor.shape.as_list()
+
+  non_static_indexes = []
+  for (index, dim) in enumerate(shape):
+    if dim is None:
+      non_static_indexes.append(index)
+
+  if not non_static_indexes:
+    return shape
+
+  dyn_shape = tf.shape(tensor)
+  for index in non_static_indexes:
+    shape[index] = dyn_shape[index]
+  return shape
+
+def reshape_from_matrix(output_tensor, orig_shape_list):
+  """Reshapes a rank 2 tensor back to its original rank >= 2 tensor."""
+  if len(orig_shape_list) == 2:
+    return output_tensor
+
+  output_shape = get_shape_list(output_tensor)
+  #output_shape = output_tensor.get_shape().as_list()
+
+  orig_dims = orig_shape_list[0:-1]
+  width = output_shape[-1]
+
+  return tf.reshape(output_tensor, orig_dims + [width])
+
+
 class _Linear(object):
   """Linear map: sum_i(args[i] * W[i]), where W[i] is a variable.
   Args:
@@ -224,6 +286,10 @@ class VecAttGRUCell(RNNCell):
             kernel_initializer=self._kernel_initializer)
     c = self._activation(self._candidate_linear([inputs, r_state]))
     u = (1.0 - att_score) * u
+    # import sys
+    # p1 = tf.print(tf.shape(u), output_stream=sys.stdout)
+    # p2 = tf.print(tf.shape(c), output_stream=sys.stdout)
+    # with tf.control_dependencies([p1, p2]):
     new_h = u * state + (1 - u) * c
     return new_h, new_h
 
@@ -378,11 +444,14 @@ def din_fcn_attention(query, facts, attention_size, mask, stag='null', mode='SUM
     mask = tf.equal(mask, tf.ones_like(mask))
     facts_size = facts.get_shape().as_list()[-1]  # D value - hidden size of the RNN layer
     querry_size = query.get_shape().as_list()[-1]
+    query = reshape_to_matrix(query)
     query = tf.compat.v1.layers.dense(query, facts_size, activation=None, name='f1' + stag)
     query = prelu(query)
     queries = tf.tile(query, [1, tf.shape(facts)[1]])
     queries = tf.reshape(queries, tf.shape(facts))
     din_all = tf.concat([queries, facts, queries-facts, queries*facts], axis=-1)
+     
+    din_all = reshape_to_matrix(din_all)
     d_layer_1_all = tf.compat.v1.layers.dense(din_all, 80, activation=tf.nn.sigmoid, name='f1_att' + stag)
     d_layer_2_all = tf.compat.v1.layers.dense(d_layer_1_all, 40, activation=tf.nn.sigmoid, name='f2_att' + stag)
     d_layer_3_all = tf.compat.v1.layers.dense(d_layer_2_all, 1, activation=None, name='f3_att' + stag)

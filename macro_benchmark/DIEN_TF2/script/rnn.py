@@ -556,7 +556,7 @@ def dynamic_rnn(cell, inputs, att_scores=None, sequence_length=None, initial_sta
     TypeError: If `cell` is not an instance of RNNCell.
     ValueError: If inputs is None or an empty list.
   """
-  assert_like_rnncell(cell.name, cell)
+  #assert_like_rnncell(cell.name, cell)
 
   # By default, time_major==False and inputs are batch-major: shaped
   #   [batch, time, depth]
@@ -1116,6 +1116,7 @@ def raw_rnn(cell, loop_fn,
 
 def static_rnn(cell,
                inputs,
+               att_scores=None,
                initial_state=None,
                dtype=None,
                sequence_length=None,
@@ -1179,7 +1180,7 @@ def static_rnn(cell,
       (column size) cannot be inferred from inputs via shape inference.
   """
 
-  assert_like_rnncell(cell.name, cell)
+  #assert_like_rnncell(cell.name, cell)
   if not nest.is_sequence(inputs):
     raise TypeError("inputs must be a sequence")
   if not inputs:
@@ -1200,23 +1201,43 @@ def static_rnn(cell,
 
     # Temporarily avoid EmbeddingWrapper and seq2seq badness
     # TODO(lukaszkaiser): remove EmbeddingWrapper
-    if first_input.get_shape().ndims != 1:
+    if tf.__version__[0] == '2':
+      if first_input.get_shape().rank != 1:
+        
+        input_shape = first_input.get_shape().with_rank_at_least(2)
+        fixed_batch_size = input_shape.dims[0]
 
-      input_shape = first_input.get_shape().with_rank_at_least(2)
-      fixed_batch_size = input_shape[0]
+        flat_inputs = nest.flatten(inputs)
+        for flat_input in flat_inputs:
+          input_shape = flat_input.get_shape().with_rank_at_least(2)
+          batch_size, input_size = tensor_shape.dimension_at_index(
+              input_shape, 0), input_shape[1:]
+          fixed_batch_size.assert_is_compatible_with(batch_size)
+          for i, size in enumerate(input_size.dims):
+            if tensor_shape.dimension_value(size) is None:
+              raise ValueError(
+                  "Input size (dimension %d of inputs) must be accessible via "
+                  "shape inference, but saw value None." % i)
+      else:
+        fixed_batch_size = first_input.get_shape().with_rank_at_least(1)[0]
+    elif tf.__version__[0] == '1':
+      if first_input.get_shape().ndims != 1:
 
-      flat_inputs = nest.flatten(inputs)
-      for flat_input in flat_inputs:
-        input_shape = flat_input.get_shape().with_rank_at_least(2)
-        batch_size, input_size = input_shape[0], input_shape[1:]
-        fixed_batch_size.merge_with(batch_size)
-        for i, size in enumerate(input_size):
-          if size.value is None:
-            raise ValueError(
-                "Input size (dimension %d of inputs) must be accessible via "
-                "shape inference, but saw value None." % i)
-    else:
-      fixed_batch_size = first_input.get_shape().with_rank_at_least(1)[0]
+        input_shape = first_input.get_shape().with_rank_at_least(2)
+        fixed_batch_size = input_shape[0]
+
+        flat_inputs = nest.flatten(inputs)
+        for flat_input in flat_inputs:
+          input_shape = flat_input.get_shape().with_rank_at_least(2)
+          batch_size, input_size = input_shape[0], input_shape[1:]
+          fixed_batch_size.merge_with(batch_size)
+          for i, size in enumerate(input_size):
+            if size.value is None:
+              raise ValueError(
+                  "Input size (dimension %d of inputs) must be accessible via "
+                  "shape inference, but saw value None." % i)
+      else:
+        fixed_batch_size = first_input.get_shape().with_rank_at_least(1)[0]
 
     if fixed_batch_size.value:
       batch_size = fixed_batch_size.value
@@ -1261,7 +1282,11 @@ def static_rnn(cell,
       if time > 0:
         varscope.reuse_variables()
       # pylint: disable=cell-var-from-loop
-      call_cell = lambda: cell(input_, state)
+      if att_scores is not None:
+        att_score = att_scores[:, time, :]
+        call_cell = lambda: cell(input_, state, att_score)
+      else: 
+        call_cell = lambda: cell(input_, state)
       # pylint: enable=cell-var-from-loop
       if sequence_length is not None:
         (output, state) = _rnn_step(

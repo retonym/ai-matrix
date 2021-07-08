@@ -27,6 +27,7 @@ mkdir results
 # batchs=128
 # manner=benchmark
 # data_type=BF16
+# use_static_rnn=True
 
 for batch in $batchs
 do
@@ -34,7 +35,7 @@ do
 	echo "Running training with batch size of $batch"
 	echo "----------------------------------------------------------------"
 	start=`date +%s%N`
-    python script/train.py --mode=train --batch_size=$batch --manner=$manner --data_type=$data_type |& tee results/result_train_${batch}.txt
+    python script/train.py --mode=train --batch_size=$batch --manner=$manner --data_type=$data_type --use_static_rnn=True |& tee results/result_train_${batch}.txt
 	end=`date +%s%N`
 	total_time=$(((end-start)/1000000))
     #total_time=`bc <<< "scale = 3; ($end-$start)/1000000000"`
