@@ -151,9 +151,10 @@ class Model(object):
                 self.mid_batch_embedded = tf.cast(self.mid_batch_embedded, tf.bfloat16)
                 self.cat_batch_embedded = tf.cast(self.cat_batch_embedded, tf.bfloat16)
                 self.mid_his_batch_embedded = tf.cast(self.mid_his_batch_embedded, tf.bfloat16)
+                self.cat_his_batch_embedded = tf.cast(self.cat_his_batch_embedded, tf.bfloat16)
 
                 self.item_eb = tf.concat([self.mid_batch_embedded, self.cat_batch_embedded], 1)
-                self.item_his_eb = tf.concat([self.mid_his_batch_embedded, self.mid_his_batch_embedded], 2)
+                self.item_his_eb = tf.concat([self.mid_his_batch_embedded, self.cat_his_batch_embedded], 2)
                 self.item_his_eb_sum = tf.reduce_sum(self.item_his_eb, 1)
                 #import pdb; pdb.set_trace()
                 if self.use_negsampling:
