@@ -297,6 +297,8 @@ def train(
         train_size = 0
         approximate_accelerator_time = 0
 
+        start_iter = 5
+
         for itr in range(1):
             loss_sum = 0.0
             accuracy_sum = 0.
@@ -319,7 +321,8 @@ def train(
                     loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats])
                 end_time = time.time()
                 # print("training time of one batch: %.3f" % (end_time - start_time))
-                approximate_accelerator_time += end_time - start_time
+                if iter >= start_iter:
+                    approximate_accelerator_time += end_time - start_time
                 elapsed_time_records.append(end_time - start_time)
 
                 loss_sum += loss
@@ -351,9 +354,9 @@ def train(
             if train_size >= TOTAL_TRAIN_SIZE:
                 break
         print("iter: %d" % iter)
-        print("Total recommendations: %d" % (BENCHMARK_ITERATION * batch_size))
+        print("Total recommendations: %d" % ((BENCHMARK_ITERATION - start_iter) * batch_size))
         print("Approximate accelerator time in seconds is %.3f" % approximate_accelerator_time)
-        print("Approximate accelerator performance in recommendations/second is %.3f" % (float(BENCHMARK_ITERATION * batch_size)/float(approximate_accelerator_time)))
+        print("Approximate accelerator performance in recommendations/second is %.3f" % (float((BENCHMARK_ITERATION - start_iter) * batch_size)/float(approximate_accelerator_time)))
 
 def test(
         train_file = "local_train_splitByUser",
